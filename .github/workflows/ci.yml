@@ -1,0 +1,65 @@
+name: Application CI
+
+on:
+  push:
+    branches:
+      - main
+      - "ci/**"
+
+  pull_request:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: application-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate application
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      COMPOSE_PROGRESS: plain
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Show Docker versions
+        run: |
+          docker --version
+          docker compose version
+
+      - name: Make scripts executable
+        run: |
+          chmod +x scripts/*.sh
+
+      - name: Run complete project validation
+        run: |
+          ./scripts/validate_project.sh
+
+      - name: Show container logs on failure
+        if: failure()
+        run: |
+          docker compose \
+            --profile production \
+            ps || true
+
+          docker compose \
+            --profile production \
+            logs --no-color \
+            --tail=200 || true
+
+      - name: Clean up containers
+        if: always()
+        run: |
+          docker compose \
+            --profile production \
+            down --volumes --remove-orphans || true
