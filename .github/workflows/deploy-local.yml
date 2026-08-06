@@ -1,0 +1,122 @@
+name: Deploy to WSL
+
+on:
+  workflow_run:
+    workflows:
+      - Application CI
+    types:
+      - completed
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-wsl-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy on WSL runner
+
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - wsl-local
+
+    timeout-minutes: 30
+
+    environment:
+      name: local-wsl
+
+    steps:
+      - name: Select deployment commit
+        id: deployment
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "sha=${{ github.event.workflow_run.head_sha }}" \
+              >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" \
+              >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout tested commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.deployment.outputs.sha }}
+          clean: true
+          persist-credentials: false
+
+      - name: Show runner information
+        run: |
+          echo "Runner: $RUNNER_NAME"
+          echo "Environment: $RUNNER_ENVIRONMENT"
+          echo "Commit: ${{ steps.deployment.outputs.sha }}"
+          whoami
+          pwd
+          docker --version
+          docker compose version
+
+      - name: Make scripts executable
+        run: |
+          chmod +x scripts/*.sh
+
+      - name: Stop development frontend
+        run: |
+          docker compose stop frontend || true
+          docker compose rm --force frontend || true
+
+      - name: Deploy production application
+        run: |
+          docker compose \
+            --profile production \
+            up --build -d \
+            database \
+            redis \
+            backend \
+            worker \
+            frontend-prod
+
+      - name: Show deployed containers
+        run: |
+          docker compose \
+            --profile production \
+            ps
+
+      - name: Run production smoke test
+        env:
+          BASE_URL: http://localhost:8080
+        run: |
+          ./scripts/production_smoke_test.sh
+
+      - name: Save deployed commit
+        run: |
+          mkdir -p "$HOME/deployments"
+
+          echo "${{ steps.deployment.outputs.sha }}" \
+            > "$HOME/deployments/dataprocessingjobplatform.sha"
+
+          echo "Deployed commit:"
+          cat "$HOME/deployments/dataprocessingjobplatform.sha"
+
+      - name: Show deployment logs on failure
+        if: failure()
+        run: |
+          docker compose \
+            --profile production \
+            ps || true
+
+          docker compose \
+            --profile production \
+            logs --no-color \
+            --tail=200 || true
