@@ -30,7 +30,6 @@ jobs:
       - self-hosted
       - Linux
       - X64
-      - wsl-local
 
     timeout-minutes: 30
 
