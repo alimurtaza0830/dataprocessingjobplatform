@@ -1,0 +1,154 @@
+services:
+  frontend-prod:
+    profiles:
+      - production
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        VITE_API_BASE_URL: /api
+    container_name: data-quality-frontend-prod
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: data-quality-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:5173').then(response => { if (!response.ok) process.exit(1) }).catch(() => process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+  
+  backend:
+    build:
+      context: ./backend
+    container_name: data-quality-backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://data_quality_user:local_password@database:5432/data_quality
+      UPLOAD_DIRECTORY: /data/uploads
+      REDIS_URL: redis://redis:6379/0
+      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    volumes:
+      - upload_data:/data/uploads
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+    container_name: data-quality-worker
+    hostname: data-quality-worker
+    command:
+      - rq
+      - worker
+      - --url
+      - redis://redis:6379/0
+      - csv-processing
+    environment:
+      DATABASE_URL: postgresql+psycopg://data_quality_user:local_password@database:5432/data_quality
+      UPLOAD_DIRECTORY: /data/uploads
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - upload_data:/data/uploads
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "from redis import Redis; from rq import Worker; connection=Redis.from_url('redis://redis:6379/0'); workers=Worker.all(connection=connection); assert any(worker.hostname == 'data-quality-worker' for worker in workers)"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  database:
+    image: postgres:17-alpine
+    container_name: data-quality-database
+    environment:
+      POSTGRES_DB: data_quality
+      POSTGRES_USER: data_quality_user
+      POSTGRES_PASSWORD: local_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U data_quality_user -d data_quality"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: data-quality-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  frontend_node_modules:
+  postgres_data:
+  upload_data:
+  redis_data:
