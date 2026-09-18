@@ -1,8 +1,20 @@
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 import os
+import time
 from datetime import datetime, timezone
 from typing import Annotated
+from fastapi import Request, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from app.tracing import configure_tracing
+from opentelemetry.propagate import inject
+
+from app.metrics import ( 
+    HTTP_REQUESTS_TOTAL, 
+    HTTP_REQUEST_DURATION_SECONDS,
+    JOBS_UPLOADED_TOTAL,
+    UPLOAD_SIZE_BYTES
+)
 
 from fastapi import (
     Depends,
@@ -52,6 +64,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+configure_tracing(app)
+
 
 app.include_router(report_router)
 
@@ -81,6 +95,37 @@ DatabaseSession = Annotated[
     Depends(get_database_session),
 ]
 
+@app.middleware("http")
+async def prometheus_metrics(
+    request: Request,
+    call_next,
+):
+    start_time = time.perf_counter()
+
+    response = await call_next(request)
+
+    duration = time.perf_counter() - start_time
+
+    HTTP_REQUESTS_TOTAL.labels(
+        method=request.method,
+        path=request.url.path,
+        status=response.status_code,
+    ).inc()
+
+    HTTP_REQUEST_DURATION_SECONDS.labels(
+        method=request.method,
+        path=request.url.path,
+    ).observe(duration)
+
+    return response
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 @app.get("/")
 def application_info() -> dict[str, str]:
@@ -176,9 +221,13 @@ def upload_csv_job(
     )
 
     try:
+        trace_context: dict[str, str] = {}
+        inject(trace_context)
+
         processing_queue.enqueue(
             process_csv_job,
             processing_job.id,
+            trace_context=trace_context,
         )
 
     except RedisError as error:
@@ -194,6 +243,9 @@ def upload_csv_job(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Processing queue is unavailable",
         ) from error
+
+    JOBS_UPLOADED_TOTAL.inc()
+    UPLOAD_SIZE_BYTES.observe(file_size_bytes)
 
     return ProcessingJobResponse.model_validate(processing_job)
 

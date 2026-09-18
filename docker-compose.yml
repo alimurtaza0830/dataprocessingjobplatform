@@ -54,6 +54,9 @@ services:
       UPLOAD_DIRECTORY: /data/uploads
       REDIS_URL: redis://redis:6379/0
       ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      OTEL_SERVICE_NAME: data-quality-backend
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+
     volumes:
       - upload_data:/data/uploads
     depends_on:
@@ -61,6 +64,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     healthcheck:
       test:
         [
@@ -81,22 +86,31 @@ services:
     container_name: data-quality-worker
     hostname: data-quality-worker
     command:
-      - rq
-      - worker
-      - --url
-      - redis://redis:6379/0
-      - csv-processing
+      - python
+      - -m
+      - app.worker
+
+    ports:
+      - "9101:9101"
+      # - rq
+      # - worker
+      # - --url
+      # - redis://redis:6379/0
+      # - csv-processing
     environment:
       DATABASE_URL: postgresql+psycopg://data_quality_user:local_password@database:5432/data_quality
       UPLOAD_DIRECTORY: /data/uploads
       REDIS_URL: redis://redis:6379/0
+
     volumes:
       - upload_data:/data/uploads
+
     depends_on:
       database:
         condition: service_healthy
       redis:
         condition: service_healthy
+        
     healthcheck:
       test:
         [
@@ -147,8 +161,53 @@ services:
       retries: 5
     restart: unless-stopped
 
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: data-quality-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: data-quality-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: data-quality-otel-collector
+    command:
+      - --config=/etc/otelcol-contrib/config.yml
+    volumes:
+      - ./observability/opentelemetry/otel-collector.yml:/etc/otelcol-contrib/config.yml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: data-quality-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "14269:14269"
+
 volumes:
   frontend_node_modules:
   postgres_data:
   upload_data:
   redis_data:
+  grafana_data:
