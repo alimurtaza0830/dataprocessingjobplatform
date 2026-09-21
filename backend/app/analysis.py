@@ -1,7 +1,16 @@
+import os
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+
+MAX_CSV_ROWS = int(
+    os.getenv("MAX_CSV_ROWS", "100000")
+)
+MAX_CSV_COLUMNS = int(
+    os.getenv("MAX_CSV_COLUMNS", "1000")
+)
 
 
 def analyze_csv(file_path: str | Path) -> dict[str, Any]:
@@ -16,7 +25,12 @@ def analyze_csv(file_path: str | Path) -> dict[str, Any]:
         )
 
     try:
-        dataframe = pd.read_csv(csv_path)
+        dataframe = pd.read_csv(
+            csv_path,
+            encoding="utf-8-sig",
+            nrows=MAX_CSV_ROWS + 1,
+            on_bad_lines="error",
+        )
     except pd.errors.EmptyDataError as error:
         raise ValueError(
             "The uploaded CSV is empty or has no readable columns"
@@ -25,6 +39,22 @@ def analyze_csv(file_path: str | Path) -> dict[str, Any]:
         raise ValueError(
             "The uploaded file is not a valid CSV"
         ) from error
+    except UnicodeDecodeError as error:
+        raise ValueError(
+            "Uploaded CSV must be UTF-8 encoded"
+        ) from error
+
+    if len(dataframe) > MAX_CSV_ROWS:
+        raise ValueError(
+            "Uploaded CSV exceeds the maximum row count "
+            f"of {MAX_CSV_ROWS}"
+        )
+
+    if len(dataframe.columns) > MAX_CSV_COLUMNS:
+        raise ValueError(
+            "Uploaded CSV exceeds the maximum column count "
+            f"of {MAX_CSV_COLUMNS}"
+        )
 
     missing_values = {
         str(column): int(count)

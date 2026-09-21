@@ -1,5 +1,3 @@
-from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
 import os
 from datetime import datetime, timezone
 from typing import Annotated
@@ -25,31 +23,17 @@ from app.crud import (
 )
 from app.database import check_database_connection
 from app.dependencies import get_database_session
-from app.init_db import create_database_tables
 from app.queue import check_redis_connection, processing_queue
 from app.report_routes import router as report_router
 from app.schemas import ProcessingJobCreate, ProcessingJobResponse
-from app.storage import save_uploaded_file
+from app.storage import UploadTooLargeError, save_uploaded_file
 from app.tasks import process_csv_job
-
-
-@asynccontextmanager
-async def lifespan(
-    _: FastAPI,
-) -> AsyncIterator[None]:
-    """
-    Ensure the application database schema exists
-    before accepting requests.
-    """
-    create_database_tables()
-    yield
 
 
 app = FastAPI(
     title="Data Quality Platform",
     description="Upload CSV files and generate data-quality reports.",
     version="0.1.0",
-    lifespan=lifespan,
 )
 
 
@@ -158,6 +142,12 @@ def upload_csv_job(
             stored_filename,
             file_size_bytes,
         ) = save_uploaded_file(uploaded_file)
+
+    except UploadTooLargeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(error),
+        ) from error
 
     except ValueError as error:
         raise HTTPException(

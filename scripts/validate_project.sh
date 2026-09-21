@@ -2,25 +2,28 @@
 
 set -euo pipefail
 
+COMPOSE_ENV_FILE="${COMPOSE_ENV_FILE:-.env.example}"
+COMPOSE=(docker compose --env-file "$COMPOSE_ENV_FILE")
+
 echo "======================================"
 echo "Starting application dependencies"
 echo "======================================"
 
-docker compose up --build -d
+"${COMPOSE[@]}" up --build -d
 
 echo
 echo "======================================"
 echo "Container status"
 echo "======================================"
 
-docker compose ps
+"${COMPOSE[@]}" ps
 
 echo
 echo "======================================"
 echo "Running backend tests"
 echo "======================================"
 
-docker compose run --rm backend \
+"${COMPOSE[@]}" --profile test run --rm backend-test \
   python -m pytest -v
 
 echo
@@ -28,7 +31,7 @@ echo "======================================"
 echo "Running frontend linting"
 echo "======================================"
 
-docker compose exec -T frontend \
+"${COMPOSE[@]}" exec -T frontend \
   npm run lint
 
 echo
@@ -36,7 +39,7 @@ echo "======================================"
 echo "Running frontend tests"
 echo "======================================"
 
-docker compose exec -T frontend \
+"${COMPOSE[@]}" exec -T frontend \
   npm test
 
 echo
@@ -44,7 +47,7 @@ echo "======================================"
 echo "Building production frontend"
 echo "======================================"
 
-docker compose exec -T frontend \
+"${COMPOSE[@]}" exec -T frontend \
   npm run build
 
 echo
@@ -52,7 +55,7 @@ echo "======================================"
 echo "Starting production frontend"
 echo "======================================"
 
-docker compose \
+"${COMPOSE[@]}" \
   --profile production \
   up --build -d frontend-prod
 

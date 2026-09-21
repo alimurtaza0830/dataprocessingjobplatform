@@ -49,10 +49,12 @@ jobs:
         if: failure()
         run: |
           docker compose \
+            --env-file .env.example \
             --profile production \
             ps || true
 
           docker compose \
+            --env-file .env.example \
             --profile production \
             logs --no-color \
             --tail=200 || true
@@ -61,5 +63,6 @@ jobs:
         if: always()
         run: |
           docker compose \
+            --env-file .env.example \
             --profile production \
             down --volumes --remove-orphans || true
