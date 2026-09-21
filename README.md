@@ -84,6 +84,10 @@ Failed jobs retain their error message so failures are visible through both the 
 | RQ worker | Processes queued CSV jobs |
 | Pandas | Performs the data-quality analysis |
 | Alembic | Applies database schema migrations |
+| Prometheus | Scrapes backend and worker metrics |
+| Grafana | Visualizes Prometheus metrics |
+| OpenTelemetry Collector | Receives traces and forwards them to Jaeger |
+| Jaeger | Displays distributed traces |
 | Docker Compose | Orchestrates the local application containers |
 
 ## Data-quality report
@@ -118,7 +122,7 @@ Start the development environment:
 docker compose --env-file .env up --build -d
 ~~~
 
-Compose starts PostgreSQL, Redis, a one-shot upload-volume initializer, a one-shot Alembic migration service, the FastAPI backend, the RQ worker, and the Vite frontend.
+Compose starts PostgreSQL, Redis, a one-shot upload-volume initializer, a one-shot Alembic migration service, the FastAPI backend, the RQ worker, the observability stack, and the Vite frontend.
 
 Check all containers:
 
@@ -190,6 +194,20 @@ curl -s http://localhost:8080/api/health/ready \
   | python3 -m json.tool
 ~~~
 
+## Observability
+
+The default Compose stack includes Prometheus, Grafana, OpenTelemetry Collector, and Jaeger.
+
+| Tool | URL |
+|---|---|
+| Backend metrics | `http://localhost:8000/metrics` |
+| Worker metrics | `http://localhost:9101/metrics` |
+| Prometheus | `http://localhost:9090` |
+| Grafana | `http://localhost:3000` |
+| Jaeger | `http://localhost:16686` |
+
+Grafana is provisioned with Prometheus as its default data source. Backend request metrics and CSV job metrics are exposed in Prometheus format. FastAPI and worker traces are sent through the OpenTelemetry Collector to Jaeger.
+
 ## Main API endpoints
 
 | Method | Endpoint | Purpose |
@@ -224,6 +242,14 @@ The main runtime settings are defined in `.env.example`.
 | `FRONTEND_PROD_PORT` | Host port for the Nginx production frontend |
 | `POSTGRES_HOST_PORT` | Host port for PostgreSQL in local development |
 | `REDIS_HOST_PORT` | Host port for Redis in local development |
+| `WORKER_METRICS_PORT` | Host port for worker Prometheus metrics |
+| `PROMETHEUS_PORT` | Host port for Prometheus |
+| `GRAFANA_PORT` | Host port for Grafana |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint used by backend and worker tracing |
+| `OTEL_GRPC_PORT` | Host port for OTLP gRPC |
+| `OTEL_HTTP_PORT` | Host port for OTLP HTTP |
+| `JAEGER_UI_PORT` | Host port for the Jaeger UI |
+| `JAEGER_ADMIN_PORT` | Host port for Jaeger admin/metrics |
 
 ## Automated testing
 
@@ -367,6 +393,10 @@ Nginx on localhost:8080
 - PostgreSQL
 - Redis
 - RQ
+- Prometheus
+- Grafana
+- OpenTelemetry Collector
+- Jaeger
 
 ## Planned DevOps phases
 
