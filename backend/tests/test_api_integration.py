@@ -137,13 +137,13 @@ def test_readiness_endpoint() -> None:
     assert body["dependencies"]["redis"] == "healthy"
 
 
-def test_empty_csv_job_changes_to_failed() -> None:
+def test_empty_csv_upload_is_rejected() -> None:
     """
-    Verify that worker errors are saved as failed jobs.
+    Verify that invalid empty CSVs are rejected before queueing.
     """
     with httpx.Client(
         base_url=BASE_URL,
-        timeout=20,
+        timeout=10,
     ) as client:
         upload_response = client.post(
             "/jobs/upload",
@@ -156,24 +156,5 @@ def test_empty_csv_job_changes_to_failed() -> None:
             },
         )
 
-        assert upload_response.status_code == 201
-
-        created_job = upload_response.json()
-
-        assert created_job["status"] == "pending"
-
-        failed_job = wait_for_job_completion(
-            client=client,
-            job_id=created_job["id"],
-        )
-
-        assert failed_job["status"] == "failed"
-        assert failed_job["report"] is None
-        assert failed_job["error_message"] is not None
-        assert "empty" in failed_job["error_message"].lower()
-
-        report_response = client.get(
-            f"/jobs/{created_job['id']}/report"
-        )
-
-        assert report_response.status_code == 409
+    assert upload_response.status_code == 400
+    assert "empty" in upload_response.json()["detail"].lower()

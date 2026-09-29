@@ -1,6 +1,5 @@
-from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
 import os
+import time
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -9,10 +8,14 @@ from fastapi import (
     FastAPI,
     File,
     HTTPException,
+    Request,
+    Response,
     UploadFile,
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from opentelemetry.propagate import inject
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -25,33 +28,27 @@ from app.crud import (
 )
 from app.database import check_database_connection
 from app.dependencies import get_database_session
-from app.init_db import create_database_tables
+from app.metrics import (
+    HTTP_REQUEST_DURATION_SECONDS,
+    HTTP_REQUESTS_TOTAL,
+    JOBS_UPLOADED_TOTAL,
+    UPLOAD_SIZE_BYTES,
+)
 from app.queue import check_redis_connection, processing_queue
 from app.report_routes import router as report_router
 from app.schemas import ProcessingJobCreate, ProcessingJobResponse
-from app.storage import save_uploaded_file
+from app.storage import UploadTooLargeError, save_uploaded_file
 from app.tasks import process_csv_job
-
-
-@asynccontextmanager
-async def lifespan(
-    _: FastAPI,
-) -> AsyncIterator[None]:
-    """
-    Ensure the application database schema exists
-    before accepting requests.
-    """
-    create_database_tables()
-    yield
+from app.tracing import configure_tracing
 
 
 app = FastAPI(
     title="Data Quality Platform",
     description="Upload CSV files and generate data-quality reports.",
     version="0.1.0",
-    lifespan=lifespan,
 )
 
+configure_tracing(app)
 
 app.include_router(report_router)
 
@@ -80,6 +77,39 @@ DatabaseSession = Annotated[
     Session,
     Depends(get_database_session),
 ]
+
+
+@app.middleware("http")
+async def prometheus_metrics(
+    request: Request,
+    call_next,
+):
+    start_time = time.perf_counter()
+
+    response = await call_next(request)
+
+    duration = time.perf_counter() - start_time
+
+    HTTP_REQUESTS_TOTAL.labels(
+        method=request.method,
+        path=request.url.path,
+        status=response.status_code,
+    ).inc()
+
+    HTTP_REQUEST_DURATION_SECONDS.labels(
+        method=request.method,
+        path=request.url.path,
+    ).observe(duration)
+
+    return response
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 
 @app.get("/")
@@ -159,6 +189,12 @@ def upload_csv_job(
             file_size_bytes,
         ) = save_uploaded_file(uploaded_file)
 
+    except UploadTooLargeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(error),
+        ) from error
+
     except ValueError as error:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -176,9 +212,13 @@ def upload_csv_job(
     )
 
     try:
+        trace_context: dict[str, str] = {}
+        inject(trace_context)
+
         processing_queue.enqueue(
             process_csv_job,
             processing_job.id,
+            trace_context=trace_context,
         )
 
     except RedisError as error:
@@ -194,6 +234,9 @@ def upload_csv_job(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Processing queue is unavailable",
         ) from error
+
+    JOBS_UPLOADED_TOTAL.inc()
+    UPLOAD_SIZE_BYTES.observe(file_size_bytes)
 
     return ProcessingJobResponse.model_validate(processing_job)
 

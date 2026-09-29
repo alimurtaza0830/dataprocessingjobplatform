@@ -83,6 +83,11 @@ Failed jobs retain their error message so failures are visible through both the 
 | Redis | Holds temporary background-processing jobs |
 | RQ worker | Processes queued CSV jobs |
 | Pandas | Performs the data-quality analysis |
+| Alembic | Applies database schema migrations |
+| Prometheus | Scrapes backend and worker metrics |
+| Grafana | Visualizes Prometheus metrics |
+| OpenTelemetry Collector | Receives traces and forwards them to Jaeger |
+| Jaeger | Displays distributed traces |
 | Docker Compose | Orchestrates the local application containers |
 
 ## Data-quality report
@@ -103,16 +108,26 @@ The generated report currently includes:
 
 ## Local development
 
+Create a local environment file from the example:
+
+~~~bash
+cp .env.example .env
+~~~
+
+The sample values are intended for local development only. For production-like deployments, provide private values through `.env`, CI/CD secrets, Docker secrets, or a platform secret manager.
+
 Start the development environment:
 
 ~~~bash
-docker compose up --build -d
+docker compose --env-file .env up --build -d
 ~~~
+
+Compose starts PostgreSQL, Redis, a one-shot upload-volume initializer, a one-shot Alembic migration service, the FastAPI backend, the RQ worker, the observability stack, and the Vite frontend.
 
 Check all containers:
 
 ~~~bash
-docker compose ps
+docker compose --env-file .env ps
 ~~~
 
 Open the development frontend:
@@ -130,13 +145,19 @@ http://localhost:8000/docs
 View backend logs:
 
 ~~~bash
-docker compose logs -f backend
+docker compose --env-file .env logs -f backend
 ~~~
 
 View worker logs:
 
 ~~~bash
-docker compose logs -f worker
+docker compose --env-file .env logs -f worker
+~~~
+
+Run database migrations manually:
+
+~~~bash
+docker compose --env-file .env run --rm backend-migrate
 ~~~
 
 ## Production-style local environment
@@ -144,7 +165,14 @@ docker compose logs -f worker
 Start the Nginx production frontend:
 
 ~~~bash
-docker compose --profile production up --build -d
+docker compose --env-file .env --profile production up --build -d \
+  database \
+  redis \
+  storage-init \
+  backend-migrate \
+  backend \
+  worker \
+  frontend-prod
 ~~~
 
 Open the production frontend:
@@ -166,6 +194,20 @@ curl -s http://localhost:8080/api/health/ready \
   | python3 -m json.tool
 ~~~
 
+## Observability
+
+The default Compose stack includes Prometheus, Grafana, OpenTelemetry Collector, and Jaeger.
+
+| Tool | URL |
+|---|---|
+| Backend metrics | `http://localhost:8000/metrics` |
+| Worker metrics | `http://localhost:9101/metrics` |
+| Prometheus | `http://localhost:9090` |
+| Grafana | `http://localhost:3000` |
+| Jaeger | `http://localhost:16686` |
+
+Grafana is provisioned with Prometheus as its default data source. Backend request metrics and CSV job metrics are exposed in Prometheus format. FastAPI and worker traces are sent through the OpenTelemetry Collector to Jaeger.
+
 ## Main API endpoints
 
 | Method | Endpoint | Purpose |
@@ -179,37 +221,61 @@ curl -s http://localhost:8080/api/health/ready \
 | `GET` | `/health/redis` | Check Redis connectivity |
 | `GET` | `/health/ready` | Check complete backend readiness |
 
+## Configuration
+
+The main runtime settings are defined in `.env.example`.
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | SQLAlchemy/PostgreSQL connection string used by the backend, worker, and migrations |
+| `POSTGRES_DB` | Local PostgreSQL database name |
+| `POSTGRES_USER` | Local PostgreSQL username |
+| `POSTGRES_PASSWORD` | Local PostgreSQL password |
+| `REDIS_URL` | Redis connection string used by the backend and worker |
+| `UPLOAD_DIRECTORY` | Container path where uploaded CSV files are stored |
+| `ALLOWED_ORIGINS` | Comma-separated CORS origins for the FastAPI backend |
+| `MAX_UPLOAD_BYTES` | Maximum uploaded CSV size; default example is 25 MB |
+| `MAX_CSV_ROWS` | Maximum accepted CSV rows during analysis |
+| `MAX_CSV_COLUMNS` | Maximum accepted CSV columns during analysis |
+| `BACKEND_PORT` | Host port for FastAPI |
+| `FRONTEND_DEV_PORT` | Host port for the Vite frontend |
+| `FRONTEND_PROD_PORT` | Host port for the Nginx production frontend |
+| `POSTGRES_HOST_PORT` | Host port for PostgreSQL in local development |
+| `REDIS_HOST_PORT` | Host port for Redis in local development |
+| `WORKER_METRICS_PORT` | Host port for worker Prometheus metrics |
+| `PROMETHEUS_PORT` | Host port for Prometheus |
+| `GRAFANA_PORT` | Host port for Grafana |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint used by backend and worker tracing |
+| `OTEL_GRPC_PORT` | Host port for OTLP gRPC |
+| `OTEL_HTTP_PORT` | Host port for OTLP HTTP |
+| `JAEGER_UI_PORT` | Host port for the Jaeger UI |
+| `JAEGER_ADMIN_PORT` | Host port for Jaeger admin/metrics |
+
 ## Automated testing
 
 Run all backend tests:
 
 ~~~bash
-docker compose run --rm backend \
+docker compose --env-file .env --profile test run --rm backend-test \
   python -m pytest -v
 ~~~
 
 Run frontend linting:
 
 ~~~bash
-docker compose exec frontend npm run lint
+docker compose --env-file .env exec frontend npm run lint
 ~~~
 
 Run frontend tests:
 
 ~~~bash
-docker compose exec frontend npm test
+docker compose --env-file .env exec frontend npm test
 ~~~
 
 Run the frontend production build:
 
 ~~~bash
-docker compose exec frontend npm run build
-~~~
-
-Run the backend smoke test:
-
-~~~bash
-./scripts/backend_smoke_test.sh
+docker compose --env-file .env exec frontend npm run build
 ~~~
 
 Run the production end-to-end smoke test:
@@ -222,6 +288,12 @@ Run every validation step:
 
 ~~~bash
 ./scripts/validate_project.sh
+~~~
+
+By default, `validate_project.sh` uses `.env.example`. To validate with another env file:
+
+~~~bash
+COMPOSE_ENV_FILE=.env ./scripts/validate_project.sh
 ~~~
 
 ## Failure simulation
@@ -237,10 +309,10 @@ Upload it:
 ~~~bash
 curl --request POST \
   http://localhost:8000/jobs/upload \
-  --form "uploaded_file=@empty.csv"
+  --form "uploaded_file=@empty.csv;type=text/csv"
 ~~~
 
-The worker changes the job status to `failed` and stores an error such as:
+Invalid CSV files are rejected before they are queued. The API returns a validation error such as:
 
 ~~~text
 The uploaded CSV is empty or has no readable columns
@@ -249,7 +321,7 @@ The uploaded CSV is empty or has no readable columns
 Stop the worker:
 
 ~~~bash
-docker compose stop worker
+docker compose --env-file .env stop worker
 ~~~
 
 New jobs remain pending in Redis.
@@ -257,7 +329,7 @@ New jobs remain pending in Redis.
 Restart the worker:
 
 ~~~bash
-docker compose start worker
+docker compose --env-file .env start worker
 ~~~
 
 The queued jobs will then be processed.
@@ -308,6 +380,7 @@ Nginx on localhost:8080
 - FastAPI
 - Pydantic
 - SQLAlchemy
+- Alembic
 - Psycopg
 - Pandas
 - Pytest
@@ -320,6 +393,10 @@ Nginx on localhost:8080
 - PostgreSQL
 - Redis
 - RQ
+- Prometheus
+- Grafana
+- OpenTelemetry Collector
+- Jaeger
 
 ## Planned DevOps phases
 

@@ -72,7 +72,7 @@ UPLOAD_RESPONSE="$(
     --request POST \
     "$BASE_URL/api/jobs/upload" \
     --form \
-    "uploaded_file=@${TEMP_CSV};filename=customers.csv"
+    "uploaded_file=@${TEMP_CSV};filename=customers.csv;type=text/csv"
 )"
 
 JOB_ID="$(

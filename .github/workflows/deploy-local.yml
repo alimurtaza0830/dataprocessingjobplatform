@@ -72,16 +72,19 @@ jobs:
 
       - name: Stop development frontend
         run: |
-          docker compose stop frontend || true
-          docker compose rm --force frontend || true
+          docker compose --env-file .env.example stop frontend || true
+          docker compose --env-file .env.example rm --force frontend || true
 
       - name: Deploy production application
         run: |
           docker compose \
+            --env-file .env.example \
             --profile production \
             up --build -d \
             database \
             redis \
+            storage-init \
+            backend-migrate \
             backend \
             worker \
             frontend-prod
@@ -89,6 +92,7 @@ jobs:
       - name: Show deployed containers
         run: |
           docker compose \
+            --env-file .env.example \
             --profile production \
             ps
 
@@ -112,10 +116,12 @@ jobs:
         if: failure()
         run: |
           docker compose \
+            --env-file .env.example \
             --profile production \
             ps || true
 
           docker compose \
+            --env-file .env.example \
             --profile production \
             logs --no-color \
             --tail=200 || true

@@ -1,3 +1,20 @@
+x-common-backend-environment: &common-backend-environment
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+  UPLOAD_DIRECTORY: ${UPLOAD_DIRECTORY:-/data/uploads}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  MAX_CSV_ROWS: ${MAX_CSV_ROWS:-100000}
+  MAX_CSV_COLUMNS: ${MAX_CSV_COLUMNS:-1000}
+
+x-restricted-application-runtime: &restricted-application-runtime
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  pids_limit: 256
+
 services:
   frontend-prod:
     profiles:
@@ -9,10 +26,13 @@ services:
         VITE_API_BASE_URL: /api
     container_name: data-quality-frontend-prod
     ports:
-      - "8080:80"
+      - "${FRONTEND_PROD_PORT:-8080}:80"
     depends_on:
       backend:
         condition: service_healthy
+    mem_limit: 128m
+    cpus: "0.50"
+    pids_limit: 128
     restart: unless-stopped
 
   frontend:
@@ -20,7 +40,7 @@ services:
       context: ./frontend
     container_name: data-quality-frontend
     ports:
-      - "5173:5173"
+      - "${FRONTEND_DEV_PORT:-5173}:5173"
     environment:
       VITE_API_BASE_URL: http://localhost:8000
     volumes:
@@ -29,6 +49,9 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    mem_limit: 384m
+    cpus: "1.00"
+    pids_limit: 256
     healthcheck:
       test:
         [
@@ -42,25 +65,67 @@ services:
       retries: 5
       start_period: 20s
     restart: unless-stopped
+
+  storage-init:
+    image: alpine:3.22
+    container_name: data-quality-storage-init
+    command:
+      - sh
+      - -c
+      - mkdir -p /data/uploads && chown -R 10001:10001 /data/uploads
+    volumes:
+      - upload_data:/data/uploads
+    mem_limit: 64m
+    cpus: "0.25"
+    pids_limit: 64
+    restart: "no"
+
+  backend-migrate:
+    build:
+      context: ./backend
+      target: base
+    container_name: data-quality-backend-migrate
+    command:
+      - alembic
+      - upgrade
+      - head
+    environment:
+      <<: *common-backend-environment
+    depends_on:
+      database:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: "0.50"
+    pids_limit: 128
+    restart: "no"
   
   backend:
     build:
       context: ./backend
+      target: base
     container_name: data-quality-backend
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
     environment:
-      DATABASE_URL: postgresql+psycopg://data_quality_user:local_password@database:5432/data_quality
-      UPLOAD_DIRECTORY: /data/uploads
-      REDIS_URL: redis://redis:6379/0
-      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      <<: *common-backend-environment
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-26214400}
+      OTEL_SERVICE_NAME: data-quality-backend
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
     volumes:
       - upload_data:/data/uploads
     depends_on:
-      database:
-        condition: service_healthy
+      backend-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    <<: *restricted-application-runtime
+    mem_limit: 512m
+    cpus: "1.00"
     healthcheck:
       test:
         [
@@ -78,32 +143,40 @@ services:
   worker:
     build:
       context: ./backend
+      target: base
     container_name: data-quality-worker
     hostname: data-quality-worker
     command:
-      - rq
-      - worker
-      - --url
-      - redis://redis:6379/0
-      - csv-processing
+      - python
+      - -m
+      - app.worker
+    ports:
+      - "${WORKER_METRICS_PORT:-9101}:9101"
     environment:
-      DATABASE_URL: postgresql+psycopg://data_quality_user:local_password@database:5432/data_quality
-      UPLOAD_DIRECTORY: /data/uploads
-      REDIS_URL: redis://redis:6379/0
+      <<: *common-backend-environment
+      OTEL_SERVICE_NAME: data-quality-worker
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
     volumes:
       - upload_data:/data/uploads
     depends_on:
-      database:
-        condition: service_healthy
+      backend-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+    <<: *restricted-application-runtime
+    mem_limit: 768m
+    cpus: "1.00"
     healthcheck:
       test:
         [
           "CMD",
           "python",
           "-c",
-          "from redis import Redis; from rq import Worker; connection=Redis.from_url('redis://redis:6379/0'); workers=Worker.all(connection=connection); assert any(worker.hostname == 'data-quality-worker' for worker in workers)"
+          "import os; from redis import Redis; from rq import Worker; connection=Redis.from_url(os.getenv('REDIS_URL', 'redis://redis:6379/0')); workers=Worker.all(connection=connection); assert any(worker.hostname == 'data-quality-worker' for worker in workers)"
         ]
       interval: 10s
       timeout: 5s
@@ -111,33 +184,57 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  backend-test:
+    profiles:
+      - test
+    build:
+      context: ./backend
+      target: test
+    container_name: data-quality-backend-test
+    environment:
+      <<: *common-backend-environment
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-26214400}
+    depends_on:
+      backend:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    mem_limit: 512m
+    cpus: "1.00"
+    pids_limit: 256
+    restart: "no"
+
   database:
     image: postgres:17-alpine
     container_name: data-quality-database
     environment:
-      POSTGRES_DB: data_quality
-      POSTGRES_USER: data_quality_user
-      POSTGRES_PASSWORD: local_password
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     ports:
-      - "5433:5432"
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U data_quality_user -d data_quality"
+          "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""
         ]
       interval: 5s
       timeout: 5s
       retries: 5
+    mem_limit: 512m
+    cpus: "1.00"
+    pids_limit: 256
     restart: unless-stopped
 
   redis:
     image: redis:7.4-alpine
     container_name: data-quality-redis
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -145,6 +242,71 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    mem_limit: 256m
+    cpus: "0.50"
+    pids_limit: 128
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: data-quality-prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: "0.50"
+    pids_limit: 128
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: data-quality-grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+    mem_limit: 256m
+    cpus: "0.50"
+    pids_limit: 128
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: data-quality-otel-collector
+    command:
+      - --config=/etc/otelcol-contrib/config.yml
+    volumes:
+      - ./observability/opentelemetry/otel-collector.yml:/etc/otelcol-contrib/config.yml:ro
+    ports:
+      - "${OTEL_GRPC_PORT:-4317}:4317"
+      - "${OTEL_HTTP_PORT:-4318}:4318"
+    depends_on:
+      jaeger:
+        condition: service_started
+    mem_limit: 256m
+    cpus: "0.50"
+    pids_limit: 128
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/jaeger:latest
+    container_name: data-quality-jaeger
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+      - "${JAEGER_ADMIN_PORT:-14269}:14269"
+    mem_limit: 512m
+    cpus: "0.50"
+    pids_limit: 256
     restart: unless-stopped
 
 volumes:
@@ -152,3 +314,4 @@ volumes:
   postgres_data:
   upload_data:
   redis_data:
+  grafana_data:
