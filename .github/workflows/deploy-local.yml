@@ -76,31 +76,20 @@ jobs:
           docker compose --env-file .env.example rm --force frontend || true
 
       - name: Deploy production application
+        env:
+          BASE_URL: http://localhost:8080
+          COMPOSE_PROJECT_NAME: dataprocessingjobplatform
+          DEPLOY_SHA: ${{ steps.deployment.outputs.sha }}
         run: |
-          docker compose \
-            --env-file .env.example \
-            --profile production \
-            up --build -d \
-            database \
-            redis \
-            storage-init \
-            backend-migrate \
-            backend \
-            worker \
-            frontend-prod
+          ./scripts/deploy_local.sh
 
       - name: Show deployed containers
+        if: always()
         run: |
           docker compose \
             --env-file .env.example \
             --profile production \
             ps
-
-      - name: Run production smoke test
-        env:
-          BASE_URL: http://localhost:8080
-        run: |
-          ./scripts/production_smoke_test.sh
 
       - name: Save deployed commit
         run: |
